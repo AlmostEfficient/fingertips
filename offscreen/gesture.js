@@ -257,9 +257,9 @@ async function loop() {
   try {
     const now = performance.now();
     const result = gestureRecognizer.recognizeForVideo(videoElement, now);
-    const gesture = extractGesture(result);
-    if (gesture) {
-      dispatchGesture(gesture, result);
+    const hands = extractHands(result);
+    if (hands.length) {
+      dispatchGesture(hands);
     }
   } catch (err) {
     reportError(err);
@@ -270,40 +270,64 @@ async function loop() {
   scheduleNext();
 }
 
-function extractGesture(result) {
+function extractHands(result) {
   if (!result?.gestures?.length) {
-    return null;
+    return [];
   }
-  const [gestureList] = result.gestures;
-  if (!gestureList || gestureList.length === 0) {
-    return null;
+
+  const hands = [];
+  for (let index = 0; index < result.gestures.length; index += 1) {
+    const gestureList = result.gestures[index];
+    if (!gestureList || !gestureList.length) {
+      continue;
+    }
+
+    const [topGesture] = gestureList;
+    if (!topGesture) {
+      continue;
+    }
+
+    const handednessList = result.handednesses?.[index] || null;
+    const [topHandedness] = handednessList || [];
+
+    hands.push({
+      gesture: topGesture.categoryName || null,
+      score: typeof topGesture.score === 'number' ? topGesture.score : null,
+      handedness: topHandedness?.categoryName || null,
+      handednessScore: typeof topHandedness?.score === 'number' ? topHandedness.score : null
+    });
   }
-  const [topGesture] = gestureList;
-  return topGesture?.categoryName || null;
+
+  return hands;
 }
 
-function dispatchGesture(gesture, result) {
+function dispatchGesture(hands) {
   const timestamp = Date.now();
-  lastGesture = gesture;
+  const [primaryHand] = hands;
+  lastGesture = primaryHand?.gesture || 'None';
   lastDispatchTime = timestamp;
 
   console.debug('Fingertips offscreen: dispatching gesture', {
-    gesture,
-    score: result?.gestures?.[0]?.[0]?.score ?? null,
-    timestamp
+    gesture: primaryHand?.gesture || null,
+    handedness: primaryHand?.handedness || null,
+    score: primaryHand?.score ?? null,
+    timestamp,
+    handCount: hands.length
   });
 
   chrome.runtime.sendMessage({
     source: 'offscreen',
     type: 'offscreen:gesture',
     payload: {
-      gesture,
-      score: result?.gestures?.[0]?.[0]?.score ?? null,
+      gesture: primaryHand?.gesture || null,
+      handedness: primaryHand?.handedness || null,
+      score: primaryHand?.score ?? null,
+      hands,
       timestamp
     }
   }, () => {
     if (chrome.runtime.lastError) {
-      console.warn('Fingertips offscreen: failed to send gesture', chrome.runtime.lastError);
+      console.warn('Fingertips offscreen: failed to send gesture', chrome.runtime.lastError?.message || chrome.runtime.lastError);
     }
   });
 }

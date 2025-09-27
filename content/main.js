@@ -1,4 +1,7 @@
 import { showToast } from './overlay.js';
+import { performAction } from './actions.js';
+import { detectViewMode, observeModeChanges, VIEW_MODES } from './modeManager.js';
+import { ACTIONS, DEFAULT_STATE, STATE_STORAGE_KEY } from '../shared/constants.js';
 
 let activationEnabled = false;
 let previewActive = false;
@@ -10,8 +13,38 @@ let gestureEngineActive = false;
 let lastGesturePayload = null;
 let lastGestureReceivedAt = 0;
 let gestureLogInterval = null;
+let currentViewMode = VIEW_MODES.UNKNOWN;
+let stopModeObserver = null;
+
+const DEFAULT_REPEAT_DELAY = DEFAULT_STATE.repeatDelayMs || 700;
+const DEFAULT_REPEAT_INTERVAL = DEFAULT_STATE.repeatIntervalMs || 650;
+const gestureActionState = new Map();
+let extensionState = {
+  isActive: DEFAULT_STATE.isActive,
+  repeatDelayMs: DEFAULT_REPEAT_DELAY,
+  repeatIntervalMs: DEFAULT_REPEAT_INTERVAL,
+  gestureMap: { ...DEFAULT_STATE.gestureMap }
+};
+const MIN_GESTURE_SCORE = 0.55;
+const MIN_HANDEDNESS_SCORE = 0.45;
+const MODE_WARNING_COOLDOWN_MS = 4000;
+let lastModeWarningAt = 0;
 
 init();
+
+window.addEventListener('beforeunload', () => {
+  if (typeof stopModeObserver === 'function') {
+    try {
+      stopModeObserver();
+    } catch (err) {
+      console.warn('Fingertips: failed to clean up mode observer', err);
+    }
+    stopModeObserver = null;
+  }
+
+  chrome.storage.onChanged.removeListener(handleStorageChange);
+  stopPreview();
+});
 
 async function init() {
   chrome.runtime.sendMessage({ type: 'fingertips:getState' }, (response) => {
@@ -20,11 +53,21 @@ async function init() {
       console.warn('Fingertips: failed to fetch initial state', err);
       return;
     }
-    activationEnabled = Boolean(response?.state?.isActive);
+    if (response?.state) {
+      mergeExtensionState(response.state);
+    }
+    activationEnabled = Boolean(extensionState.isActive);
     if (activationEnabled) {
       startPreview();
     }
   });
+
+  currentViewMode = detectViewMode();
+  stopModeObserver = observeModeChanges((mode) => {
+    currentViewMode = mode;
+  });
+
+  chrome.storage.onChanged.addListener(handleStorageChange);
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message?.type) {
@@ -38,10 +81,10 @@ async function init() {
         stopGestureEngine().then((result) => sendResponse?.(result));
         return true;
       case 'fingertips:gesture':
-        if (message.payload?.gesture) {
+        if (message.payload) {
           lastGesturePayload = message.payload;
           lastGestureReceivedAt = Date.now();
-          console.log('Fingertips gesture detected (debug only):', message.payload);
+          handleGesturePayload(message.payload);
         }
         break;
       case 'fingertips:gestureError':
@@ -99,6 +142,42 @@ function stopPreview() {
   previewActive = false;
   warmupErrorShown = false;
   teardownPreview();
+}
+
+function handleStorageChange(changes, area) {
+  if (area !== 'local') {
+    return;
+  }
+
+  const stateChange = changes[STATE_STORAGE_KEY];
+  if (!stateChange?.newValue) {
+    return;
+  }
+
+  mergeExtensionState(stateChange.newValue);
+}
+
+function mergeExtensionState(partialState) {
+  if (!partialState) {
+    return;
+  }
+
+  extensionState = {
+    ...extensionState,
+    ...partialState,
+    gestureMap: {
+      ...extensionState.gestureMap,
+      ...(partialState.gestureMap || {})
+    }
+  };
+
+  if (typeof extensionState.repeatDelayMs !== 'number' || Number.isNaN(extensionState.repeatDelayMs)) {
+    extensionState.repeatDelayMs = DEFAULT_REPEAT_DELAY;
+  }
+
+  if (typeof extensionState.repeatIntervalMs !== 'number' || Number.isNaN(extensionState.repeatIntervalMs)) {
+    extensionState.repeatIntervalMs = DEFAULT_REPEAT_INTERVAL;
+  }
 }
 
 async function requestCameraAccess() {
@@ -208,10 +287,6 @@ async function warmupOffscreenCamera() {
       resolve(response || { ok: false, error: 'No response from offscreen document.' });
     });
   });
-
-  window.addEventListener('beforeunload', () => {
-    stopPreview();
-  });
 }
 
 function handleWarmupError(message) {
@@ -240,6 +315,7 @@ async function startGestureEngine() {
 
       if (response?.ok) {
         gestureEngineActive = true;
+        gestureActionState.clear();
         startGestureLogging();
         resolve({ ok: true });
       } else {
@@ -266,6 +342,7 @@ async function stopGestureEngine() {
 
       gestureEngineActive = false;
       stopGestureLogging();
+      gestureActionState.clear();
       lastGesturePayload = null;
       lastGestureReceivedAt = 0;
       resolve(response || { ok: true });
@@ -284,9 +361,20 @@ function startGestureLogging() {
 
     const now = Date.now();
     if (lastGesturePayload && now - lastGestureReceivedAt <= 1500) {
+      const hands = Array.isArray(lastGesturePayload.hands) ? lastGesturePayload.hands : [];
+      const gestureSummary = lastGesturePayload.gesture || (hands.length
+        ? hands.map((hand) => hand?.gesture).filter(Boolean).join(', ') || null
+        : null);
+      const handednessSummary = lastGesturePayload.handedness || (hands.length
+        ? hands.map((hand) => hand?.handedness).filter(Boolean).join(', ') || null
+        : null);
+      const scoreSummary = typeof lastGesturePayload.score === 'number'
+        ? lastGesturePayload.score
+        : (hands.find((hand) => typeof hand?.score === 'number')?.score ?? null);
       console.log('Fingertips gesture monitor:', {
-        gesture: lastGesturePayload.gesture,
-        score: lastGesturePayload.score ?? null,
+        gesture: gestureSummary,
+        handedness: handednessSummary,
+        score: scoreSummary,
         ageMs: now - lastGestureReceivedAt
       });
     } else {
@@ -322,4 +410,189 @@ function normalizeCameraError(err) {
 
   const message = err?.message || String(err);
   return new Error(`Camera access failed: ${message}`);
+}
+
+function handleGesturePayload(payload) {
+  if (!gestureEngineActive || !payload) {
+    return;
+  }
+
+  const now = Date.now();
+  pruneStaleGestureState(now);
+
+  const entries = normalizeHands(payload);
+  if (!entries.length) {
+    return;
+  }
+
+  if (currentViewMode !== VIEW_MODES.ONE_UP) {
+    maybeWarnAboutViewMode(entries);
+    return;
+  }
+
+  entries.forEach((entry) => {
+    if (!entry.gesture) {
+      return;
+    }
+
+    if (typeof entry.score === 'number' && entry.score < MIN_GESTURE_SCORE) {
+      return;
+    }
+
+    const action = resolveActionForEntry(entry);
+    if (!action || action === ACTIONS.NONE) {
+      return;
+    }
+
+    if (requiresConfidentHand(entry) && !hasConfidentHand(entry)) {
+      return;
+    }
+
+    const key = buildGestureKey(entry, action);
+    if (shouldDispatchForKey(key, now)) {
+      triggerAction(action);
+    }
+  });
+}
+
+function normalizeHands(payload) {
+  if (Array.isArray(payload.hands) && payload.hands.length) {
+    return payload.hands
+      .map((hand) => ({
+        gesture: hand?.gesture || null,
+        score: typeof hand?.score === 'number' ? hand.score : null,
+        handedness: hand?.handedness || null,
+        handednessScore: typeof hand?.handednessScore === 'number' ? hand.handednessScore : null
+      }))
+      .filter((hand) => Boolean(hand.gesture));
+  }
+
+  if (payload.gesture) {
+    return [{
+      gesture: payload.gesture,
+      score: typeof payload.score === 'number' ? payload.score : null,
+      handedness: payload.handedness || null,
+      handednessScore: typeof payload.handednessScore === 'number' ? payload.handednessScore : null
+    }];
+  }
+
+  return [];
+}
+
+function resolveActionForEntry(entry) {
+  const handedness = (entry.handedness || '').toLowerCase();
+  if (entry.gesture === 'Pointing_Up') {
+    if (handedness === 'left') {
+      return ACTIONS.PREVIOUS;
+    }
+    if (handedness === 'right') {
+      return ACTIONS.NEXT;
+    }
+  }
+
+  return extensionState.gestureMap?.[entry.gesture] || ACTIONS.NONE;
+}
+
+function requiresConfidentHand(entry) {
+  if (entry.gesture !== 'Pointing_Up') {
+    return false;
+  }
+  const handedness = (entry.handedness || '').toLowerCase();
+  return handedness === 'left' || handedness === 'right';
+}
+
+function hasConfidentHand(entry) {
+  if (typeof entry.handednessScore !== 'number') {
+    return false;
+  }
+  return entry.handednessScore >= MIN_HANDEDNESS_SCORE;
+}
+
+function buildGestureKey(entry, action) {
+  const handed = (entry.handedness || 'unknown').toLowerCase();
+  return `${handed}:${entry.gesture}:${action}`;
+}
+
+function shouldDispatchForKey(key, now) {
+  const repeatDelay = extensionState.repeatDelayMs ?? DEFAULT_REPEAT_DELAY;
+  const repeatInterval = extensionState.repeatIntervalMs ?? DEFAULT_REPEAT_INTERVAL;
+  const idleReset = Math.max(repeatDelay, repeatInterval) * 1.5;
+
+  const state = gestureActionState.get(key) || {
+    lastTriggered: 0,
+    lastSeen: 0,
+    phase: 'initial'
+  };
+
+  if (state.lastSeen && now - state.lastSeen > idleReset) {
+    state.lastTriggered = 0;
+    state.phase = 'initial';
+  }
+
+  const threshold = state.phase === 'initial'
+    ? 0
+    : state.phase === 'delay'
+    ? repeatDelay
+    : repeatInterval;
+
+  const allow = state.lastTriggered === 0 || now - state.lastTriggered >= threshold;
+  state.lastSeen = now;
+
+  if (allow) {
+    state.lastTriggered = now;
+    state.phase = state.phase === 'initial' ? 'delay' : 'repeat';
+  }
+
+  gestureActionState.set(key, state);
+  return allow;
+}
+
+function pruneStaleGestureState(now) {
+  const repeatDelay = extensionState.repeatDelayMs ?? DEFAULT_REPEAT_DELAY;
+  const repeatInterval = extensionState.repeatIntervalMs ?? DEFAULT_REPEAT_INTERVAL;
+  const idleReset = Math.max(repeatDelay, repeatInterval) * 3;
+
+  for (const [key, state] of gestureActionState.entries()) {
+    if (!state?.lastSeen) {
+      continue;
+    }
+    if (now - state.lastSeen > idleReset) {
+      gestureActionState.delete(key);
+    }
+  }
+}
+
+function triggerAction(action) {
+  try {
+    const result = performAction(action);
+    if (result && typeof result.then === 'function') {
+      result.catch((err) => {
+        console.error('Fingertips: action handler rejected', err);
+      });
+    }
+  } catch (err) {
+    console.error('Fingertips: failed to dispatch action', err);
+  }
+}
+
+function maybeWarnAboutViewMode(entries) {
+  if (!entries?.length) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastModeWarningAt < MODE_WARNING_COOLDOWN_MS) {
+    return;
+  }
+
+  const hasPointingUp = entries.some((entry) => entry?.gesture === 'Pointing_Up');
+  if (!hasPointingUp) {
+    return;
+  }
+
+  lastModeWarningAt = now;
+  showToast('Open a single photo to use navigation gestures.', {
+    tone: 'neutral',
+    duration: 2200
+  });
 }

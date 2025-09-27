@@ -211,7 +211,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'offscreen:gesture':
       console.debug('Fingertips background: gesture received', message.payload);
       dispatchGestureToTabs(message.payload);
-      break;
+      sendResponse?.({ ok: true });
+      return false;
     case 'offscreen:error':
       notifyTabsOfError(message.payload);
       break;
