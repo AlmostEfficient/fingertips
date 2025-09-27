@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fingertips</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup">
+    <header>
+      <h1>Fingertips</h1>
+      <p class="subtitle">Gesture control for iCloud Photos</p>
+    </header>
+
+    <section class="control">
+      <label class="toggle">
+        <input type="checkbox" id="activation-toggle" />
+        <span>Enable gesture controls on this tab</span>
+      </label>
+      <button id="request-camera" class="ghost">Request camera access</button>
+    </section>
+
+    <section class="status" id="status"></section>
+
+    <section class="mappings">
+      <h2>Gesture mappings</h2>
+      <div id="mappings"></div>
+    </section>
+
+    <footer>
+      <button id="restore-defaults" class="ghost">Restore defaults</button>
+    </footer>
+  </div>
+
+  <template id="mapping-row">
+    <div class="mapping-row">
+      <span class="gesture"></span>
+      <select class="action"></select>
+    </div>
+  </template>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

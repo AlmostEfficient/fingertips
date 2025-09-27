@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Fingertips",
+  "description": "Gesture-driven navigation and deletion helper for iCloud Photos.",
+  "version": "0.5.0",
+  "action": {
+    "default_title": "Fingertips",
+    "default_popup": "popup/popup.html"
+  },
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "activeTab",
+    "webRequest",
+    "offscreen"
+  ],
+  "host_permissions": ["*://*.icloud.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.icloud.com/photos/*"],
+      "js": ["content/index.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "models/gesture_recognizer.task",
+        "libs/*",
+        "content/*.js",
+        "shared/*.js",
+        "offscreen/*"
+      ],
+      "matches": ["*://*.icloud.com/*"]
+    }
+  ]
+}
