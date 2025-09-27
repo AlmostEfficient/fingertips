@@ -1,1 +1,3 @@
-Place the MediaPipe Tasks vision runtime here. When installing dependencies via npm, copy the contents of `node_modules/@mediapipe/tasks-vision/wasm` into this directory and keep the file names intact. The `gesture_recognizer.task` model is already bundled in `../models/`.
+# MediaPipe runtime bundle
+
+These files are copied from `node_modules/@mediapipe/tasks-vision` for packaging the extension. They are git-ignored so remember to run the commands in the root README (`cp vision_bundle.mjs` and the `wasm` folder) before zipping for the Chrome Web Store.

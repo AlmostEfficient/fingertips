@@ -1,7 +1,6 @@
-import { getExtensionState, observeStateChanges } from '../shared/storage.js';
 import { showToast } from './overlay.js';
 
-let currentState = null;
+let activationEnabled = false;
 let previewActive = false;
 let previewVideo = null;
 let previewStream = null;
@@ -15,15 +14,15 @@ let gestureLogInterval = null;
 init();
 
 async function init() {
-  currentState = await getExtensionState();
-
-  observeStateChanges((nextState) => {
-    currentState = nextState;
-    if (currentState.isActive) {
+  chrome.runtime.sendMessage({ type: 'fingertips:getState' }, (response) => {
+    const err = chrome.runtime.lastError;
+    if (err) {
+      console.warn('Fingertips: failed to fetch initial state', err);
+      return;
+    }
+    activationEnabled = Boolean(response?.state?.isActive);
+    if (activationEnabled) {
       startPreview();
-    } else {
-      stopPreview();
-      showToast('Camera preview disabled');
     }
   });
 
@@ -56,7 +55,8 @@ async function init() {
         }
         break;
       case 'fingertips:activationChanged':
-        if (message.isActive) {
+        activationEnabled = Boolean(message.isActive);
+        if (activationEnabled) {
           startPreview();
           showToast('Camera preview enabled', { tone: 'success' });
         } else {
@@ -71,13 +71,6 @@ async function init() {
     return false;
   });
 
-  if (currentState.isActive) {
-    startPreview();
-  }
-
-  window.addEventListener('beforeunload', () => {
-    stopPreview();
-  });
 }
 
 async function startPreview() {
@@ -214,6 +207,10 @@ async function warmupOffscreenCamera() {
       }
       resolve(response || { ok: false, error: 'No response from offscreen document.' });
     });
+  });
+
+  window.addEventListener('beforeunload', () => {
+    stopPreview();
   });
 }
 

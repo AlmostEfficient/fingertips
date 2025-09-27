@@ -11,7 +11,6 @@ const statusEl = document.getElementById('status');
 const mappingsContainer = document.getElementById('mappings');
 const activationToggle = document.getElementById('activation-toggle');
 const requestCameraButton = document.getElementById('request-camera');
-const warmupEngineButton = document.getElementById('warmup-engine');
 const startEngineButton = document.getElementById('start-engine');
 const stopEngineButton = document.getElementById('stop-engine');
 const grantCameraButton = document.getElementById('grant-camera');
@@ -161,34 +160,6 @@ requestCameraButton.addEventListener('click', () => {
   });
 });
 
-warmupEngineButton.addEventListener('click', () => {
-  setStatus('Warming up gesture engine...');
-  chrome.runtime.sendMessage({ type: 'fingertips:requestCamera' }, (response) => {
-    const err = chrome.runtime.lastError;
-    if (err) {
-      console.error('Gesture engine warmup request failed', err);
-      setStatus('Gesture engine unreachable. Reload the extension.', true);
-      return;
-    }
-
-    if (response?.ok) {
-      setStatus('Gesture engine warmed up.');
-    } else {
-      const errorMsg = response?.error ?? 'Unknown error';
-      const normalizedError = typeof errorMsg === 'string'
-        ? errorMsg
-        : JSON.stringify(errorMsg, Object.getOwnPropertyNames(errorMsg));
-      const message = `Gesture engine warmup failed: ${normalizedError}`;
-      console.error('Gesture engine warmup failed', {
-        response,
-        error: errorMsg,
-        errorType: typeof errorMsg
-      });
-      setStatus(message, true);
-    }
-  });
-});
-
 startEngineButton.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (!tabs?.length) {
@@ -256,7 +227,8 @@ grantCameraButton.addEventListener('click', () => {
     }
 
     if (response?.ok) {
-      setStatus('Camera permission granted for the extension.');
+      setStatus('Camera permission granted. Warming up gesture engine…');
+      warmupGestureEngine();
     } else {
       const errorMsg = response?.error ?? 'Unknown error';
       const normalizedError = typeof errorMsg === 'string'
@@ -266,6 +238,33 @@ grantCameraButton.addEventListener('click', () => {
     }
   });
 });
+
+function warmupGestureEngine() {
+  chrome.runtime.sendMessage({ type: 'fingertips:requestCamera' }, (response) => {
+    const err = chrome.runtime.lastError;
+    if (err) {
+      console.error('Gesture engine warmup request failed', err);
+      setStatus('Gesture engine unreachable. Reload the extension.', true);
+      return;
+    }
+
+    if (response?.ok) {
+      setStatus('Gesture engine warmed up.');
+    } else {
+      const errorMsg = response?.error ?? 'Unknown error';
+      const normalizedError = typeof errorMsg === 'string'
+        ? errorMsg
+        : JSON.stringify(errorMsg, Object.getOwnPropertyNames(errorMsg));
+      const message = `Gesture engine warmup failed: ${normalizedError}`;
+      console.error('Gesture engine warmup failed', {
+        response,
+        error: errorMsg,
+        errorType: typeof errorMsg
+      });
+      setStatus(message, true);
+    }
+  });
+}
 
 restoreButton.addEventListener('click', async () => {
   await updateState({ gestureMap: { ...DEFAULT_GESTURE_MAP } });

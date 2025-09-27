@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Fingertips",
   "description": "Gesture-driven navigation and deletion helper for iCloud Photos.",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "action": {
     "default_title": "Fingertips",
     "default_popup": "popup/popup.html"

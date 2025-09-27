@@ -7,7 +7,7 @@ import {
 } from './shared/storage.js';
 
 const CAPTURE_URL_PATTERN = /\/records\/modify/;
-const ACTIVE_GESTURE_TABS = new Set();
+let gestureTabId = null;
 const PENDING_CAMERA_REQUESTS = new Map();
 let pendingConsentRequest = null;
 const CONSENT_PAGE_URL = chrome.runtime.getURL('consent/consent.html');
@@ -34,7 +34,7 @@ async function closeOffscreenDocumentIfIdle() {
     return;
   }
 
-  if (ACTIVE_GESTURE_TABS.size > 0 || PENDING_CAMERA_REQUESTS.size > 0) {
+  if (gestureTabId !== null || PENDING_CAMERA_REQUESTS.size > 0) {
     return;
   }
 
@@ -46,11 +46,10 @@ async function closeOffscreenDocumentIfIdle() {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (ACTIVE_GESTURE_TABS.delete(tabId)) {
-    if (ACTIVE_GESTURE_TABS.size === 0) {
-      chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
-      closeOffscreenDocumentIfIdle().catch(() => {});
-    }
+  if (gestureTabId === tabId) {
+    gestureTabId = null;
+    chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
+    closeOffscreenDocumentIfIdle().catch(() => {});
   }
 });
 
@@ -236,7 +235,7 @@ async function handleStartRecognition(sender, sendResponse) {
       return;
     }
 
-    ACTIVE_GESTURE_TABS.add(tabId);
+    gestureTabId = tabId;
 
     await ensureOffscreenDocument();
     await waitForOffscreenReady();
@@ -249,9 +248,8 @@ async function handleStartRecognition(sender, sendResponse) {
     sendResponse?.({ ok: true });
   } catch (err) {
     console.error('Fingertips: failed to start offscreen recognizer', err);
-    const tabId = sender?.tab?.id;
-    if (typeof tabId === 'number') {
-      ACTIVE_GESTURE_TABS.delete(tabId);
+    if (gestureTabId === sender?.tab?.id) {
+      gestureTabId = null;
     }
     sendResponse?.({ ok: false, error: err?.message || String(err) });
     closeOffscreenDocumentIfIdle().catch(() => {});
@@ -260,11 +258,8 @@ async function handleStartRecognition(sender, sendResponse) {
 
 function handleStopRecognition(sender) {
   const tabId = sender?.tab?.id;
-  if (typeof tabId === 'number') {
-    ACTIVE_GESTURE_TABS.delete(tabId);
-  }
-
-  if (ACTIVE_GESTURE_TABS.size === 0) {
+  if (typeof tabId === 'number' && gestureTabId === tabId) {
+    gestureTabId = null;
     try {
       chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
     } catch (err) {
@@ -354,30 +349,30 @@ async function resolveCameraConsent(payload) {
 }
 
 function dispatchGestureToTabs(payload) {
-  if (!payload?.gesture || ACTIVE_GESTURE_TABS.size === 0) {
+  if (!payload?.gesture || typeof gestureTabId !== 'number') {
     return;
   }
 
-  for (const tabId of [...ACTIVE_GESTURE_TABS]) {
-    console.debug('Fingertips background: forwarding gesture to tab', { tabId, gesture: payload.gesture });
-    try {
-      chrome.tabs.sendMessage(tabId, { type: 'fingertips:gesture', payload });
-    } catch (err) {
-      console.warn('Fingertips background: failed to send gesture to tab', tabId, err);
-      ACTIVE_GESTURE_TABS.delete(tabId);
+  console.debug('Fingertips background: forwarding gesture to tab', {
+    tabId: gestureTabId,
+    gesture: payload.gesture
+  });
+
+  chrome.tabs
+    .sendMessage(gestureTabId, { type: 'fingertips:gesture', payload })
+    .catch((err) => {
+      console.warn('Fingertips background: failed to send gesture to tab', gestureTabId, err);
+      gestureTabId = null;
       chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
       closeOffscreenDocumentIfIdle().catch(() => {});
-    }
-  }
+    });
 }
 
 function notifyTabsOfError(payload) {
-  if (ACTIVE_GESTURE_TABS.size === 0) {
+  if (typeof gestureTabId !== 'number') {
     return;
   }
-  for (const tabId of ACTIVE_GESTURE_TABS) {
-    chrome.tabs.sendMessage(tabId, { type: 'fingertips:gestureError', payload }, () => undefined);
-  }
+  chrome.tabs.sendMessage(gestureTabId, { type: 'fingertips:gestureError', payload }, () => undefined);
 }
 
 function waitForOffscreenReady(timeoutMs = 4000) {

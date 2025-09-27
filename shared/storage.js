@@ -37,15 +37,6 @@ export async function setExtensionState(partialState) {
   return nextState;
 }
 
-export function observeStateChanges(callback) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes[STATE_STORAGE_KEY]) {
-      return;
-    }
-    callback(changes[STATE_STORAGE_KEY].newValue, changes[STATE_STORAGE_KEY].oldValue);
-  });
-}
-
 export async function getDeleteEndpoint() {
   const stored = await chrome.storage.local.get(DELETE_ENDPOINT_KEY);
   return stored[DELETE_ENDPOINT_KEY] || null;
