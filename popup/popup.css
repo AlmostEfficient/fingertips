@@ -31,9 +31,8 @@ header h1 {
 
 .control {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .control .toggle {
@@ -42,6 +41,17 @@ header h1 {
   gap: 8px;
   cursor: pointer;
   font-size: 13px;
+}
+
+.control-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.control-buttons button {
+  flex: 1 1 48%;
+  min-width: 140px;
 }
 
 .control input[type="checkbox"] {

@@ -34,9 +34,13 @@
         "libs/*",
         "content/*.js",
         "shared/*.js",
-        "offscreen/*"
+        "offscreen/*",
+        "consent/*"
       ],
       "matches": ["*://*.icloud.com/*"]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
 }

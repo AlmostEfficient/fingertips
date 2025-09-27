@@ -16,9 +16,15 @@
     <section class="control">
       <label class="toggle">
         <input type="checkbox" id="activation-toggle" />
-        <span>Enable gesture controls on this tab</span>
+        <span>Enable camera preview on this tab</span>
       </label>
-      <button id="request-camera" class="ghost">Request camera access</button>
+      <div class="control-buttons">
+        <button id="request-camera" class="ghost">Request camera</button>
+        <button id="warmup-engine" class="ghost">Warm up gesture engine</button>
+        <button id="start-engine" class="ghost">Start gesture engine</button>
+        <button id="stop-engine" class="ghost">Stop gesture engine</button>
+        <button id="grant-camera" class="ghost">Grant camera permission</button>
+      </div>
     </section>
 
     <section class="status" id="status"></section>

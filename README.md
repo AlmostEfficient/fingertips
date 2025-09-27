@@ -34,7 +34,8 @@ Ensure the ESM entry `tasks-vision.esm.js` and the `wasm` folder are present; th
 1. Copy the `gesture_recognizer.task` model from the `hotos` repo into `models/` (already done in this workspace).
 2. Load the unpacked directory in Chrome (`chrome://extensions` → *Developer mode* → *Load unpacked*).
 3. Navigate to `https://www.icloud.com/photos/`, open the extension popup, toggle **Enable camera preview**, and click **Request camera**. Chrome will prompt for camera access the first time we call `getUserMedia`; approve it so the overlay can appear.
-4. After the prompt is accepted, the preview overlay appears in the bottom-right corner.
+4. Use **Grant camera permission** if the warmup keeps reporting a permission denial—this opens a visible prompt window so Chrome can show the extension-level request. After granting, **Warm up gesture engine** should succeed and you can toggle **Start/Stop gesture engine** to exercise the recognizer without live actions.
+5. After the prompt is accepted, the preview overlay appears in the bottom-right corner.
 
 ## Gesture mappings & repeat tuning
 Open the popup to remap gestures (left column) to extension actions. Repeat delay/interval defaults live in `shared/constants.js` and are persisted in `chrome.storage.local` as part of the extension state. Adjustments can be added to the popup later if desired.

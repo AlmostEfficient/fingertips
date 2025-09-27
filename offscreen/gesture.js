@@ -204,7 +204,7 @@ async function warmupCamera(requestId) {
       console.warn('Failed to send camera warmup success message:', msgErr);
     }
   } catch (err) {
-    console.error('Fingertips offscreen: camera warmup failed', err);
+    console.error('Fingertips offscreen: camera warmup failed', err, err?.name, err?.message);
     const errorMsg = err.name === 'NotAllowedError'
       ? 'Camera permission denied'
       : err.name === 'NotReadableError'

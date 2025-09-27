@@ -9,6 +9,8 @@ import {
 const CAPTURE_URL_PATTERN = /\/records\/modify/;
 const ACTIVE_GESTURE_TABS = new Set();
 const PENDING_CAMERA_REQUESTS = new Map();
+let pendingConsentRequest = null;
+const CONSENT_PAGE_URL = chrome.runtime.getURL('consent/consent.html');
 let offscreenReady = false;
 
 async function ensureOffscreenDocument() {
@@ -48,6 +50,18 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (ACTIVE_GESTURE_TABS.size === 0) {
       chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
       closeOffscreenDocumentIfIdle().catch(() => {});
+    }
+  }
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (pendingConsentRequest?.windowId === windowId) {
+    const { sendResponse } = pendingConsentRequest;
+    pendingConsentRequest = null;
+    try {
+      sendResponse?.({ ok: false, error: 'Camera permission dismissed.' });
+    } catch (err) {
+      console.warn('Fingertips: failed to notify about dismissed camera consent', err);
     }
   }
 });
@@ -183,6 +197,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse?.({ ok: false, error: err?.message || String(err) });
       });
       return true;
+    case 'fingertips:requestCameraConsent':
+      handleCameraConsentRequest(sendResponse).catch((err) => {
+        console.error('Fingertips: camera consent window failed', err);
+        sendResponse?.({ ok: false, error: err?.message || String(err) });
+      });
+      return true;
+    case 'fingertips:consentResult':
+      resolveCameraConsent(message.payload || { ok: false, error: 'UNKNOWN' });
+      break;
     case 'offscreen:ready':
       offscreenReady = true;
       break;
@@ -284,6 +307,49 @@ function resolveCameraRequest(requestId, payload) {
   console.info('Fingertips: camera warmup result', { requestId, payload });
   callback(payload || { ok: false, error: 'UNKNOWN' });
   closeOffscreenDocumentIfIdle().catch(() => {});
+}
+
+async function handleCameraConsentRequest(sendResponse) {
+  if (pendingConsentRequest) {
+    sendResponse?.({ ok: false, error: 'Camera permission prompt already open.' });
+    return;
+  }
+
+  const window = await chrome.windows.create({
+    url: CONSENT_PAGE_URL,
+    type: 'popup',
+    width: 420,
+    height: 520,
+    focused: true
+  });
+
+  pendingConsentRequest = {
+    sendResponse,
+    windowId: window?.id || null
+  };
+}
+
+async function resolveCameraConsent(payload) {
+  if (!pendingConsentRequest) {
+    return;
+  }
+
+  const { sendResponse, windowId } = pendingConsentRequest;
+  pendingConsentRequest = null;
+
+  if (windowId) {
+    try {
+      await chrome.windows.remove(windowId);
+    } catch (err) {
+      console.warn('Fingertips: failed to close camera consent window', err);
+    }
+  }
+
+  try {
+    sendResponse?.(payload);
+  } catch (err) {
+    console.warn('Fingertips: failed to respond to camera consent request', err);
+  }
 }
 
 function dispatchGestureToTabs(payload) {

@@ -11,6 +11,10 @@ const statusEl = document.getElementById('status');
 const mappingsContainer = document.getElementById('mappings');
 const activationToggle = document.getElementById('activation-toggle');
 const requestCameraButton = document.getElementById('request-camera');
+const warmupEngineButton = document.getElementById('warmup-engine');
+const startEngineButton = document.getElementById('start-engine');
+const stopEngineButton = document.getElementById('stop-engine');
+const grantCameraButton = document.getElementById('grant-camera');
 const restoreButton = document.getElementById('restore-defaults');
 const rowTemplate = document.getElementById('mapping-row');
 
@@ -138,7 +142,7 @@ requestCameraButton.addEventListener('click', () => {
         }
 
         if (response?.ok) {
-          setStatus('Camera access granted. Gestures ready.');
+          setStatus('Camera access granted. Preview running.');
         } else {
           const errorMsg = response?.error ?? 'Unknown error';
           const normalizedError = typeof errorMsg === 'string'
@@ -154,6 +158,112 @@ requestCameraButton.addEventListener('click', () => {
         }
       }
     );
+  });
+});
+
+warmupEngineButton.addEventListener('click', () => {
+  setStatus('Warming up gesture engine...');
+  chrome.runtime.sendMessage({ type: 'fingertips:requestCamera' }, (response) => {
+    const err = chrome.runtime.lastError;
+    if (err) {
+      console.error('Gesture engine warmup request failed', err);
+      setStatus('Gesture engine unreachable. Reload the extension.', true);
+      return;
+    }
+
+    if (response?.ok) {
+      setStatus('Gesture engine warmed up.');
+    } else {
+      const errorMsg = response?.error ?? 'Unknown error';
+      const normalizedError = typeof errorMsg === 'string'
+        ? errorMsg
+        : JSON.stringify(errorMsg, Object.getOwnPropertyNames(errorMsg));
+      const message = `Gesture engine warmup failed: ${normalizedError}`;
+      console.error('Gesture engine warmup failed', {
+        response,
+        error: errorMsg,
+        errorType: typeof errorMsg
+      });
+      setStatus(message, true);
+    }
+  });
+});
+
+startEngineButton.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs?.length) {
+      setStatus('Open your iCloud Photos tab first.', true);
+      return;
+    }
+
+    chrome.tabs.sendMessage(
+      tabs[0].id,
+      { type: 'fingertips:startGestureEngine' },
+      (response) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          console.error('Gesture engine start dispatch failed', err);
+          setStatus('Unable to reach the tab. Make sure iCloud Photos is open.', true);
+          return;
+        }
+
+        if (response?.ok) {
+          setStatus('Gesture engine started.');
+        } else {
+          const errorMsg = response?.error ?? 'Unknown error';
+          const normalizedError = typeof errorMsg === 'string'
+            ? errorMsg
+            : JSON.stringify(errorMsg, Object.getOwnPropertyNames(errorMsg));
+          setStatus(`Gesture engine failed to start: ${normalizedError}`, true);
+        }
+      }
+    );
+  });
+});
+
+stopEngineButton.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs?.length) {
+      setStatus('Open your iCloud Photos tab first.', true);
+      return;
+    }
+
+    chrome.tabs.sendMessage(
+      tabs[0].id,
+      { type: 'fingertips:stopGestureEngine' },
+      () => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          console.error('Gesture engine stop dispatch failed', err);
+          setStatus('Unable to reach the tab. Make sure iCloud Photos is open.', true);
+          return;
+        }
+
+        setStatus('Gesture engine stop requested.');
+      }
+    );
+  });
+});
+
+grantCameraButton.addEventListener('click', () => {
+  setStatus('Opening camera permission window…');
+  chrome.runtime.sendMessage({ type: 'fingertips:requestCameraConsent' }, (response) => {
+    const err = chrome.runtime.lastError;
+    if (err) {
+      console.error('Camera consent request failed', err);
+      setStatus('Unable to request camera permission.', true);
+      return;
+    }
+
+    if (response?.ok) {
+      setStatus('Camera permission granted for the extension.');
+    } else {
+      const errorMsg = response?.error ?? 'Unknown error';
+      const normalizedError = typeof errorMsg === 'string'
+        ? errorMsg
+        : JSON.stringify(errorMsg, Object.getOwnPropertyNames(errorMsg));
+      setStatus(`Camera permission failed: ${normalizedError}`, true);
+    }
   });
 });
 

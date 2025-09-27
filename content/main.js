@@ -6,6 +6,8 @@ let previewActive = false;
 let previewVideo = null;
 let previewStream = null;
 let previewPromise = null;
+let warmupErrorShown = false;
+let gestureEngineActive = false;
 
 init();
 
@@ -27,6 +29,27 @@ async function init() {
       case 'fingertips:requestCamera':
         requestCameraAccess().then((result) => sendResponse?.(result));
         return true;
+      case 'fingertips:startGestureEngine':
+        startGestureEngine().then((result) => sendResponse?.(result));
+        return true;
+      case 'fingertips:stopGestureEngine':
+        stopGestureEngine().then((result) => sendResponse?.(result));
+        return true;
+      case 'fingertips:gesture':
+        if (message.payload?.gesture) {
+          console.log('Fingertips gesture detected (debug only):', message.payload);
+        }
+        break;
+      case 'fingertips:gestureError':
+        if (message.payload?.message) {
+          console.warn('Fingertips gesture engine error (debug):', message.payload.message);
+          showToast(`Gesture engine error: ${message.payload.message}`, {
+            tone: 'error',
+            duration: 3600
+          });
+          gestureEngineActive = false;
+        }
+        break;
       case 'fingertips:activationChanged':
         if (message.isActive) {
           startPreview();
@@ -76,6 +99,7 @@ function stopPreview() {
     return;
   }
   previewActive = false;
+  warmupErrorShown = false;
   teardownPreview();
 }
 
@@ -83,7 +107,16 @@ async function requestCameraAccess() {
   try {
     await ensurePreview();
     previewActive = true;
-    showToast('Camera access granted.', { tone: 'success' });
+    const warmupResult = await warmupOffscreenCamera();
+    if (warmupResult?.ok) {
+      showToast('Camera access granted.', { tone: 'success' });
+      return { ok: true };
+    }
+    if (warmupResult) {
+      const message = warmupResult.error || 'Gesture engine could not access the camera.';
+      handleWarmupError(message);
+      return { ok: false, error: message };
+    }
     return { ok: true };
   } catch (err) {
     previewActive = false;
@@ -164,6 +197,74 @@ function teardownPreview() {
     previewVideo = null;
   }
   previewPromise = null;
+}
+
+async function warmupOffscreenCamera() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'fingertips:requestCamera' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('Fingertips: offscreen camera request failed', chrome.runtime.lastError);
+        resolve({ ok: false, error: chrome.runtime.lastError?.message || 'Unable to reach gesture engine.' });
+        return;
+      }
+      resolve(response || { ok: false, error: 'No response from offscreen document.' });
+    });
+  });
+}
+
+function handleWarmupError(message) {
+  console.warn('Fingertips: offscreen warmup error', message);
+  if (!warmupErrorShown) {
+    warmupErrorShown = true;
+    showToast(`${message} Use “Grant camera permission” in the popup, then try again.`, {
+      tone: 'error',
+      duration: 3600
+    });
+  }
+}
+
+async function startGestureEngine() {
+  if (gestureEngineActive) {
+    return { ok: true };
+  }
+
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'fingertips:startRecognition' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Fingertips: failed to start gesture engine', chrome.runtime.lastError);
+        resolve({ ok: false, error: chrome.runtime.lastError?.message || 'Gesture engine unavailable.' });
+        return;
+      }
+
+      if (response?.ok) {
+        gestureEngineActive = true;
+        resolve({ ok: true });
+      } else {
+        gestureEngineActive = false;
+        resolve({ ok: false, error: response?.error || 'Gesture engine failed to start.' });
+      }
+    });
+  });
+}
+
+async function stopGestureEngine() {
+  if (!gestureEngineActive) {
+    gestureEngineActive = false;
+    return { ok: true };
+  }
+
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'fingertips:stopRecognition' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Fingertips: failed to stop gesture engine', chrome.runtime.lastError);
+        resolve({ ok: false, error: chrome.runtime.lastError?.message || 'Gesture engine stop failed.' });
+        return;
+      }
+
+      gestureEngineActive = false;
+      resolve(response || { ok: true });
+    });
+  });
 }
 
 function normalizeCameraError(err) {
