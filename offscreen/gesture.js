@@ -248,6 +248,12 @@ async function loop() {
     return;
   }
 
+  const scheduleNext = () => {
+    if (isRunning) {
+      setTimeout(() => loop(), 100);
+    }
+  };
+
   try {
     const now = performance.now();
     const result = gestureRecognizer.recognizeForVideo(videoElement, now);
@@ -257,11 +263,11 @@ async function loop() {
     }
   } catch (err) {
     reportError(err);
+    scheduleNext();
+    return;
   }
 
-  if (isRunning) {
-    requestAnimationFrame(() => loop());
-  }
+  scheduleNext();
 }
 
 function extractGesture(result) {
@@ -278,11 +284,14 @@ function extractGesture(result) {
 
 function dispatchGesture(gesture, result) {
   const timestamp = Date.now();
-  if (gesture === lastGesture && timestamp - lastDispatchTime < 400) {
-    return;
-  }
   lastGesture = gesture;
   lastDispatchTime = timestamp;
+
+  console.debug('Fingertips offscreen: dispatching gesture', {
+    gesture,
+    score: result?.gestures?.[0]?.[0]?.score ?? null,
+    timestamp
+  });
 
   chrome.runtime.sendMessage({
     source: 'offscreen',
@@ -291,6 +300,10 @@ function dispatchGesture(gesture, result) {
       gesture,
       score: result?.gestures?.[0]?.[0]?.score ?? null,
       timestamp
+    }
+  }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn('Fingertips offscreen: failed to send gesture', chrome.runtime.lastError);
     }
   });
 }

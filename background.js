@@ -210,6 +210,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       offscreenReady = true;
       break;
     case 'offscreen:gesture':
+      console.debug('Fingertips background: gesture received', message.payload);
       dispatchGestureToTabs(message.payload);
       break;
     case 'offscreen:error':
@@ -358,12 +359,15 @@ function dispatchGestureToTabs(payload) {
   }
 
   for (const tabId of [...ACTIVE_GESTURE_TABS]) {
-    chrome.tabs.sendMessage(tabId, { type: 'fingertips:gesture', payload }, () => {
-      if (chrome.runtime.lastError) {
-        ACTIVE_GESTURE_TABS.delete(tabId);
-        closeOffscreenDocumentIfIdle().catch(() => {});
-      }
-    });
+    console.debug('Fingertips background: forwarding gesture to tab', { tabId, gesture: payload.gesture });
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'fingertips:gesture', payload });
+    } catch (err) {
+      console.warn('Fingertips background: failed to send gesture to tab', tabId, err);
+      ACTIVE_GESTURE_TABS.delete(tabId);
+      chrome.runtime.sendMessage({ target: 'offscreen', type: 'offscreen:stop' });
+      closeOffscreenDocumentIfIdle().catch(() => {});
+    }
   }
 }
 

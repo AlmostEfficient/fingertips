@@ -8,6 +8,9 @@ let previewStream = null;
 let previewPromise = null;
 let warmupErrorShown = false;
 let gestureEngineActive = false;
+let lastGesturePayload = null;
+let lastGestureReceivedAt = 0;
+let gestureLogInterval = null;
 
 init();
 
@@ -37,6 +40,8 @@ async function init() {
         return true;
       case 'fingertips:gesture':
         if (message.payload?.gesture) {
+          lastGesturePayload = message.payload;
+          lastGestureReceivedAt = Date.now();
           console.log('Fingertips gesture detected (debug only):', message.payload);
         }
         break;
@@ -238,6 +243,7 @@ async function startGestureEngine() {
 
       if (response?.ok) {
         gestureEngineActive = true;
+        startGestureLogging();
         resolve({ ok: true });
       } else {
         gestureEngineActive = false;
@@ -262,9 +268,41 @@ async function stopGestureEngine() {
       }
 
       gestureEngineActive = false;
+      stopGestureLogging();
+      lastGesturePayload = null;
+      lastGestureReceivedAt = 0;
       resolve(response || { ok: true });
     });
   });
+}
+
+function startGestureLogging() {
+  if (gestureLogInterval) {
+    return;
+  }
+  gestureLogInterval = setInterval(() => {
+    if (!gestureEngineActive) {
+      return;
+    }
+
+    const now = Date.now();
+    if (lastGesturePayload && now - lastGestureReceivedAt <= 1500) {
+      console.log('Fingertips gesture monitor:', {
+        gesture: lastGesturePayload.gesture,
+        score: lastGesturePayload.score ?? null,
+        ageMs: now - lastGestureReceivedAt
+      });
+    } else {
+      console.log('Fingertips gesture monitor: no gesture detected in the last second');
+    }
+  }, 1000);
+}
+
+function stopGestureLogging() {
+  if (gestureLogInterval) {
+    clearInterval(gestureLogInterval);
+    gestureLogInterval = null;
+  }
 }
 
 function normalizeCameraError(err) {
