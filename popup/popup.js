@@ -1,8 +1,10 @@
 import {
-  ACTIONS,
   ACTION_LABELS,
-  DEFAULT_GESTURE_MAP,
-  GESTURE_NAMES
+  ACTION_ORDER,
+  DEFAULT_ACTION_BINDINGS,
+  GESTURE_NAMES,
+  HAND_LABELS,
+  HAND_OPTIONS
 } from '../shared/constants.js';
 
 let currentState = null;
@@ -29,6 +31,9 @@ async function fetchState() {
   const response = await chrome.runtime.sendMessage({ type: 'fingertips:getState' });
   if (response?.state) {
     currentState = response.state;
+    if (!currentState.actionBindings) {
+      currentState.actionBindings = cloneDefaultBindings();
+    }
   }
 }
 
@@ -49,31 +54,55 @@ function renderState() {
   activationToggle.checked = Boolean(currentState.isActive);
 
   mappingsContainer.innerHTML = '';
-  for (const gesture of GESTURE_NAMES) {
-    if (gesture === 'None') {
-      continue;
-    }
-
+  for (const action of ACTION_ORDER) {
+    const binding = currentState.actionBindings?.[action] || DEFAULT_ACTION_BINDINGS[action];
     const row = rowTemplate.content.firstElementChild.cloneNode(true);
-    row.querySelector('.gesture').textContent = gesture.replace('_', ' ');
+    row.querySelector('.action-label').textContent = ACTION_LABELS[action];
 
-    const select = row.querySelector('select');
-    Object.values(ACTIONS).forEach((action) => {
+    const gestureSelect = row.querySelector('.gesture-select');
+    GESTURE_NAMES.forEach((gestureName) => {
       const option = document.createElement('option');
-      option.value = action;
-      option.textContent = ACTION_LABELS[action];
-      if (currentState.gestureMap?.[gesture] === action) {
+      option.value = gestureName;
+      option.textContent = gestureName.replace(/_/g, ' ');
+      if (binding?.gesture === gestureName) {
         option.selected = true;
       }
-      select.appendChild(option);
+      gestureSelect.appendChild(option);
     });
 
-    select.addEventListener('change', () => {
-      updateState({
-        gestureMap: {
-          ...currentState.gestureMap,
-          [gesture]: select.value
-        }
+    const handSelect = row.querySelector('.hand-select');
+    Object.values(HAND_OPTIONS).forEach((handOption) => {
+      const option = document.createElement('option');
+      option.value = handOption;
+      option.textContent = HAND_LABELS[handOption];
+      if ((binding?.hand || HAND_OPTIONS.ANY) === handOption) {
+        option.selected = true;
+      }
+      handSelect.appendChild(option);
+    });
+
+    const updateHandState = () => {
+      const disabled = gestureSelect.value === 'None';
+      handSelect.disabled = disabled;
+      if (disabled) {
+        handSelect.value = HAND_OPTIONS.ANY;
+      }
+    };
+
+    updateHandState();
+
+    gestureSelect.addEventListener('change', () => {
+      updateHandState();
+      persistBinding(action, {
+        gesture: gestureSelect.value,
+        hand: handSelect.value
+      });
+    });
+
+    handSelect.addEventListener('change', () => {
+      persistBinding(action, {
+        gesture: gestureSelect.value,
+        hand: handSelect.value
       });
     });
 
@@ -94,6 +123,40 @@ async function updateState(partialState) {
     console.error('Fingertips popup failed to update state', err);
     setStatus('Failed to update settings');
   }
+}
+
+function persistBinding(action, binding) {
+  if (!currentState) {
+    return;
+  }
+
+  const gesture = binding.gesture;
+  const hand = gesture === 'None' ? HAND_OPTIONS.ANY : binding.hand;
+
+  const nextBinding = {
+    gesture,
+    hand
+  };
+
+  currentState.actionBindings = {
+    ...(currentState.actionBindings || {}),
+    [action]: nextBinding
+  };
+
+  updateState({
+    actionBindings: {
+      ...currentState.actionBindings,
+      [action]: nextBinding
+    }
+  });
+}
+
+function cloneDefaultBindings() {
+  const bindings = {};
+  for (const action of ACTION_ORDER) {
+    bindings[action] = { ...DEFAULT_ACTION_BINDINGS[action] };
+  }
+  return bindings;
 }
 
 async function init() {
@@ -267,7 +330,7 @@ function warmupGestureEngine() {
 }
 
 restoreButton.addEventListener('click', async () => {
-  await updateState({ gestureMap: { ...DEFAULT_GESTURE_MAP } });
+  await updateState({ actionBindings: cloneDefaultBindings() });
   await fetchState();
   renderState();
   setStatus('Defaults restored.');

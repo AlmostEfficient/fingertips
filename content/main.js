@@ -1,7 +1,13 @@
 import { showToast } from './overlay.js';
 import { performAction } from './actions.js';
 import { detectViewMode, observeModeChanges, VIEW_MODES } from './modeManager.js';
-import { ACTIONS, DEFAULT_STATE, STATE_STORAGE_KEY } from '../shared/constants.js';
+import {
+  ACTION_ORDER,
+  DEFAULT_ACTION_BINDINGS,
+  DEFAULT_STATE,
+  HAND_OPTIONS,
+  STATE_STORAGE_KEY
+} from '../shared/constants.js';
 
 let activationEnabled = false;
 let previewActive = false;
@@ -16,14 +22,14 @@ let gestureLogInterval = null;
 let currentViewMode = VIEW_MODES.UNKNOWN;
 let stopModeObserver = null;
 
-const DEFAULT_REPEAT_DELAY = DEFAULT_STATE.repeatDelayMs || 700;
-const DEFAULT_REPEAT_INTERVAL = DEFAULT_STATE.repeatIntervalMs || 650;
+const DEFAULT_REPEAT_DELAY = DEFAULT_STATE.repeatDelayMs || 120;
+const DEFAULT_REPEAT_INTERVAL = DEFAULT_STATE.repeatIntervalMs || 120;
 const gestureActionState = new Map();
 let extensionState = {
   isActive: DEFAULT_STATE.isActive,
   repeatDelayMs: DEFAULT_REPEAT_DELAY,
   repeatIntervalMs: DEFAULT_REPEAT_INTERVAL,
-  gestureMap: { ...DEFAULT_STATE.gestureMap }
+  actionBindings: sanitizeBindings(DEFAULT_STATE.actionBindings)
 };
 const MIN_GESTURE_SCORE = 0.55;
 const MIN_HANDEDNESS_SCORE = 0.45;
@@ -157,6 +163,24 @@ function handleStorageChange(changes, area) {
   mergeExtensionState(stateChange.newValue);
 }
 
+function sanitizeBindings(bindings) {
+  const result = {};
+  const source = bindings && typeof bindings === 'object' ? bindings : {};
+  for (const action of ACTION_ORDER) {
+    const fallback = DEFAULT_ACTION_BINDINGS[action];
+    const entry = source[action];
+    const gesture = typeof entry?.gesture === 'string' ? entry.gesture : fallback.gesture;
+    let handValue = typeof entry?.hand === 'string' ? entry.hand.toLowerCase() : fallback.hand;
+    if (gesture === 'None') {
+      handValue = HAND_OPTIONS.ANY;
+    } else if (handValue !== HAND_OPTIONS.LEFT && handValue !== HAND_OPTIONS.RIGHT) {
+      handValue = HAND_OPTIONS.ANY;
+    }
+    result[action] = { gesture, hand: handValue };
+  }
+  return result;
+}
+
 function mergeExtensionState(partialState) {
   if (!partialState) {
     return;
@@ -165,11 +189,10 @@ function mergeExtensionState(partialState) {
   extensionState = {
     ...extensionState,
     ...partialState,
-    gestureMap: {
-      ...extensionState.gestureMap,
-      ...(partialState.gestureMap || {})
-    }
+    actionBindings: sanitizeBindings(partialState.actionBindings || extensionState.actionBindings)
   };
+
+  delete extensionState.gestureMap;
 
   if (typeof extensionState.repeatDelayMs !== 'number' || Number.isNaN(extensionState.repeatDelayMs)) {
     extensionState.repeatDelayMs = DEFAULT_REPEAT_DELAY;
@@ -431,7 +454,8 @@ function handleGesturePayload(payload) {
   }
 
   entries.forEach((entry) => {
-    if (!entry.gesture) {
+    const match = matchActionForEntry(entry);
+    if (!match) {
       return;
     }
 
@@ -439,16 +463,13 @@ function handleGesturePayload(payload) {
       return;
     }
 
-    const action = resolveActionForEntry(entry);
-    if (!action || action === ACTIONS.NONE) {
+    const { action, binding } = match;
+
+    if (bindingRequiresSpecificHand(binding) && !hasConfidentHand(entry)) {
       return;
     }
 
-    if (requiresConfidentHand(entry) && !hasConfidentHand(entry)) {
-      return;
-    }
-
-    const key = buildGestureKey(entry, action);
+    const key = buildGestureKey(entry, action, binding);
     if (shouldDispatchForKey(key, now)) {
       triggerAction(action);
     }
@@ -479,26 +500,49 @@ function normalizeHands(payload) {
   return [];
 }
 
-function resolveActionForEntry(entry) {
-  const handedness = (entry.handedness || '').toLowerCase();
-  if (entry.gesture === 'Pointing_Up') {
-    if (handedness === 'left') {
-      return ACTIONS.PREVIOUS;
-    }
-    if (handedness === 'right') {
-      return ACTIONS.NEXT;
-    }
+function matchActionForEntry(entry) {
+  if (!entry?.gesture) {
+    return null;
   }
 
-  return extensionState.gestureMap?.[entry.gesture] || ACTIONS.NONE;
+  const entryHand = normalizeHandValue(entry.handedness);
+
+  for (const action of ACTION_ORDER) {
+    const binding = extensionState.actionBindings?.[action];
+    if (!binding) {
+      continue;
+    }
+
+    const gesture = binding.gesture;
+    if (!gesture || gesture === 'None' || gesture !== entry.gesture) {
+      continue;
+    }
+
+    const requiredHand = normalizeHandValue(binding.hand);
+    if (requiredHand !== HAND_OPTIONS.ANY && requiredHand !== entryHand) {
+      continue;
+    }
+
+    return { action, binding };
+  }
+
+  return null;
 }
 
-function requiresConfidentHand(entry) {
-  if (entry.gesture !== 'Pointing_Up') {
-    return false;
+function normalizeHandValue(value) {
+  const lower = typeof value === 'string' ? value.toLowerCase() : '';
+  if (lower === HAND_OPTIONS.LEFT || lower === 'left') {
+    return HAND_OPTIONS.LEFT;
   }
-  const handedness = (entry.handedness || '').toLowerCase();
-  return handedness === 'left' || handedness === 'right';
+  if (lower === HAND_OPTIONS.RIGHT || lower === 'right') {
+    return HAND_OPTIONS.RIGHT;
+  }
+  return HAND_OPTIONS.ANY;
+}
+
+function bindingRequiresSpecificHand(binding) {
+  const hand = normalizeHandValue(binding?.hand);
+  return hand === HAND_OPTIONS.LEFT || hand === HAND_OPTIONS.RIGHT;
 }
 
 function hasConfidentHand(entry) {
@@ -508,9 +552,11 @@ function hasConfidentHand(entry) {
   return entry.handednessScore >= MIN_HANDEDNESS_SCORE;
 }
 
-function buildGestureKey(entry, action) {
-  const handed = (entry.handedness || 'unknown').toLowerCase();
-  return `${handed}:${entry.gesture}:${action}`;
+function buildGestureKey(entry, action, binding) {
+  const entryHand = normalizeHandValue(entry.handedness);
+  const requiredHand = normalizeHandValue(binding?.hand);
+  const handKey = requiredHand === HAND_OPTIONS.ANY ? entryHand : requiredHand;
+  return `${handKey}:${entry.gesture}:${action}`;
 }
 
 function shouldDispatchForKey(key, now) {
@@ -585,8 +631,21 @@ function maybeWarnAboutViewMode(entries) {
     return;
   }
 
-  const hasPointingUp = entries.some((entry) => entry?.gesture === 'Pointing_Up');
-  if (!hasPointingUp) {
+  const actionable = entries.some((entry) => {
+    const match = matchActionForEntry(entry);
+    if (!match) {
+      return false;
+    }
+    if (typeof entry.score === 'number' && entry.score < MIN_GESTURE_SCORE) {
+      return false;
+    }
+    if (bindingRequiresSpecificHand(match.binding) && !hasConfidentHand(entry)) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!actionable) {
     return;
   }
 

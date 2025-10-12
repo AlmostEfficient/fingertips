@@ -3,17 +3,17 @@
 Gesture-driven helper that streamlines navigation and deletion inside [iCloud Photos](https://www.icloud.com/photos/).
 
 ## Features (current build)
-- Popup toggle to enable/disable the on-page camera preview.
-- Camera warmup button in the popup to request access and show the preview inside iCloud Photos.
-- Under-the-hood pieces for gesture-driven navigation remain in the repo, but gesture dispatch is currently disabled while we stabilise camera behaviour.
+- Popup controls to warm the camera, surface the preview overlay, and start/stop the gesture recogniser.
+- Action-first gesture mapping UI: assign any supported gesture (optionally per-hand) to navigation, delete, favorite, or enter/exit actions.
+- 400 ms repeat cadence for held gestures, matching the automation cadence used in `photo_manager.py`.
 
 ## Project Layout
 ```
 manifest.json
 background.js
 shared/          # shared constants + chrome.storage helpers
-content/         # injected scripts (preview overlay only)
-offscreen/       # gesture recognizer scaffolding (idle for now)
+content/         # injected scripts (preview overlay + gesture dispatcher)
+offscreen/       # gesture recognizer worker (MediaPipe Hands)
 popup/           # popup UI (HTML/CSS/JS)
 models/          # gesture_recognizer.task (copied from hotos)
 consent/         # visible camera-permission window
@@ -40,13 +40,12 @@ The offscreen recognizer loads `libs/tasks-vision.esm.js` and the accompanying W
 5. After the prompt is accepted, the preview overlay appears in the bottom-right corner.
 
 ## Gesture mappings & repeat tuning
-Open the popup to remap gestures (left column) to extension actions. Repeat delay/interval defaults live in `shared/constants.js` and are persisted in `chrome.storage.local` as part of the extension state. Adjustments can be added to the popup later if desired.
+Open the popup to choose which gesture (and which hand, if you care) should drive each action: up/right/down/left navigation, delete, favorite, enter, or exit. Bindings live in `shared/constants.js` with a 400 ms repeat delay/interval and are persisted in `chrome.storage.local` for the content script to consume.
 
 ## Delete flow notes
 - The first delete uses the native toolbar so the background service worker can capture the full CloudKit endpoint + payload template.
 - Subsequent deletes call `records/modify` directly with the stored template and the current asset metadata (record name + change tag taken from the Photos React fiber tree). If metadata is unavailable, the script falls back to the UI path.
 - After successful direct deletes, the script nudges the UI (arrow-right in OneUp, DOM cleanup in grid view) to keep navigation smooth while Photos receives CloudKit updates.
-- Gesture recognition is temporarily disabled; the offscreen document remains in the codebase for future reactivation once camera handling is solid.
 
 ## Development tips
 - To inspect asset metadata resolution, enable Chrome DevTools on the iCloud tab and watch console logs prefixed with `Fingertips`.

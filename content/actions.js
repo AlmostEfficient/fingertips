@@ -1,22 +1,95 @@
 import { ACTIONS } from '../shared/constants.js';
 import { detectViewMode, VIEW_MODES } from './modeManager.js';
-import { getActiveRecord, ensureRecordHasChangeTag } from './recordResolver.js';
+import {
+  getActiveRecord,
+  ensureRecordHasChangeTag,
+  getDeleteEndpointDetails
+} from './recordResolver.js';
 import { showToast } from './overlay.js';
 
-function dispatchKey(key) {
+const CLOUDKIT_MODIFY_HEADERS = {
+  'Content-Type': 'text/plain;charset=UTF-8'
+};
+const MAX_DELETE_ATTEMPTS = 3;
+const DELETE_RETRY_BASE_DELAY_MS = 220;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseCloudKitErrorPayload(text) {
+  if (!text) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    return { raw: text };
+  }
+}
+
+function extractCloudKitErrorCode(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const candidates = [
+    payload.serverErrorCode,
+    payload.serverCode,
+    payload.reason,
+    payload.error,
+    payload.errorCode
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim().toUpperCase();
+    }
+  }
+  return null;
+}
+
+function isZoneBusyCode(code) {
+  if (!code) {
+    return false;
+  }
+  return code === 'ZONE_BUSY' || code === 'TRY_AGAIN_LATER';
+}
+
+function shouldRetryDelete(status, code, attempt) {
+  if (attempt >= MAX_DELETE_ATTEMPTS) {
+    return false;
+  }
+
+  if (status === 409 && isZoneBusyCode(code)) {
+    return true;
+  }
+
+  if (status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+
+  return false;
+}
+
+function dispatchKey(key, options = {}) {
   const keyCodeMap = {
     ArrowLeft: 37,
     ArrowRight: 39,
-    Delete: 46
+    ArrowUp: 38,
+    ArrowDown: 40,
+    Delete: 46,
+    Enter: 13,
+    Escape: 27,
+    f: 70,
+    F: 70
   };
-  const keyCode = keyCodeMap[key] || 0;
+  const keyCode = typeof options.keyCode === 'number' ? options.keyCode : (keyCodeMap[key] || 0);
   const target = document.activeElement && document.activeElement !== document.body
     ? document.activeElement
     : document.body || document.documentElement;
 
   const eventInit = {
     key,
-    code: key,
+    code: options.code || key,
     keyCode,
     which: keyCode,
     bubbles: true,
@@ -150,28 +223,103 @@ function waitFor(testFn, timeout = 800) {
 }
 
 async function deleteViaApi() {
-  const record = ensureRecordHasChangeTag(getActiveRecord());
+  const rawRecord = getActiveRecord();
+  const record = await ensureRecordHasChangeTag(rawRecord);
   if (!record) {
     return { ok: false, reason: 'MISSING_METADATA' };
   }
 
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'fingertips:performDelete',
-      record
-    });
-
-    if (response?.ok) {
-      showToast('Photo deleted', { tone: 'success', duration: 1800 });
-      postDeleteUiCleanup();
-      return { ok: true };
-    }
-
-    return { ok: false, reason: response?.error || 'UNKNOWN' };
-  } catch (err) {
-    console.error('Fingertips: background delete failed', err);
-    return { ok: false, reason: 'REQUEST_FAILED' };
+  const endpointDetails = await getDeleteEndpointDetails();
+  if (!endpointDetails?.url || !endpointDetails?.payloadTemplate) {
+    return { ok: false, reason: 'NO_ENDPOINT_CAPTURED' };
   }
+
+  const baseFields = endpointDetails.payloadTemplate.fields || {};
+  const recordType = record.recordType || endpointDetails.payloadTemplate.recordType;
+  const body = {
+    atomic: endpointDetails.payloadTemplate.atomic,
+    operations: [
+      {
+        operationType: 'update',
+        record: {
+          recordName: record.recordName,
+          recordChangeTag: record.recordChangeTag,
+          recordType,
+          fields: {
+            ...baseFields,
+            isDeleted: { value: 1 }
+          }
+        }
+      }
+    ],
+    zoneID: endpointDetails.payloadTemplate.zoneID
+  };
+
+  let lastStatus = null;
+  let lastCode = null;
+  let lastText = '';
+
+  for (let attempt = 1; attempt <= MAX_DELETE_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await window.fetch(endpointDetails.url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { ...CLOUDKIT_MODIFY_HEADERS },
+        body: JSON.stringify(body)
+      });
+
+      if (response.ok) {
+        await response.json().catch(() => null);
+        showToast('Photo deleted', { tone: 'success', duration: 1800 });
+        postDeleteUiCleanup();
+        return { ok: true };
+      }
+
+      lastStatus = response.status;
+      lastText = await response.text().catch(() => '');
+      const payload = parseCloudKitErrorPayload(lastText);
+      lastCode = extractCloudKitErrorCode(payload);
+
+      console.warn('Fingertips delete: API HTTP error', {
+        recordName: record.recordName,
+        status: response.status,
+        code: lastCode,
+        attempt,
+        body: lastText
+      });
+
+      if (shouldRetryDelete(response.status, lastCode, attempt)) {
+        await sleep(DELETE_RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+
+      if (response.status === 409 && isZoneBusyCode(lastCode)) {
+        return { ok: false, reason: 'ZONE_BUSY', status: response.status };
+      }
+
+      return {
+        ok: false,
+        reason: 'DELETE_HTTP_ERROR',
+        status: response.status,
+        code: lastCode
+      };
+    } catch (err) {
+      console.error('Fingertips delete: request failed', err);
+      if (attempt < MAX_DELETE_ATTEMPTS) {
+        await sleep(DELETE_RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+      return { ok: false, reason: 'REQUEST_FAILED' };
+    }
+  }
+
+  return {
+    ok: false,
+    reason: lastStatus ? 'DELETE_HTTP_ERROR' : 'REQUEST_FAILED',
+    status: lastStatus || null,
+    code: lastCode,
+    body: lastText
+  };
 }
 
 function postDeleteUiCleanup() {
@@ -192,18 +340,33 @@ function postDeleteUiCleanup() {
 
 export async function performAction(action) {
   switch (action) {
-    case ACTIONS.NEXT:
+    case ACTIONS.MOVE_RIGHT:
       if (!navigateOneUp('next')) {
         dispatchKey('ArrowRight');
       }
       break;
-    case ACTIONS.PREVIOUS:
+    case ACTIONS.MOVE_LEFT:
       if (!navigateOneUp('previous')) {
         dispatchKey('ArrowLeft');
       }
       break;
+    case ACTIONS.MOVE_UP:
+      dispatchKey('ArrowUp');
+      break;
+    case ACTIONS.MOVE_DOWN:
+      dispatchKey('ArrowDown');
+      break;
     case ACTIONS.DELETE:
       await handleDelete();
+      break;
+    case ACTIONS.FAVORITE:
+      await handleFavorite();
+      break;
+    case ACTIONS.ENTER:
+      await handleEnterDetail();
+      break;
+    case ACTIONS.EXIT:
+      dispatchKey('Escape');
       break;
     default:
       break;
@@ -240,6 +403,20 @@ const PREV_BUTTON_SELECTORS = [
   '.OneUp button[aria-label="Previous item"]',
   '.OneUp button[title="Previous"]',
   '.OneUp button[aria-label*="Previous"]'
+];
+
+const FAVORITE_ONE_UP_SELECTORS = [
+  '.OneUp button[aria-label="Favorite"]',
+  '.OneUp button[aria-label="Add to Favorites"]',
+  '.OneUp button[aria-label="Remove from Favorites"]',
+  '.OneUp button[aria-label*="Favourite"]'
+];
+
+const FAVORITE_GRID_SELECTORS = [
+  '.Toolbar button[aria-label="Favorite"]',
+  '.Toolbar button[aria-label="Add to Favorites"]',
+  '.Toolbar button[aria-label="Remove from Favorites"]',
+  '.Toolbar button[aria-label*="Favourite"]'
 ];
 
 function findFirst(selectors) {
@@ -287,23 +464,96 @@ function findFirst(selectors) {
   return null;
 }
 
-async function handleDelete() {
-  const endpointInfo = await chrome.runtime.sendMessage({ type: 'fingertips:getDeleteEndpoint' });
-  const hasEndpoint = Boolean(endpointInfo?.details);
+async function handleFavorite() {
+  const mode = detectViewMode();
 
-  if (hasEndpoint) {
-    const result = await deleteViaApi();
-    if (result.ok) {
+  if (mode === VIEW_MODES.ONE_UP) {
+    const button = findFirst(FAVORITE_ONE_UP_SELECTORS);
+    if (button) {
+      button.click();
       return;
-    }
-    if (result.reason === 'NO_ENDPOINT_CAPTURED') {
-      showToast('Delete endpoint not captured yet. Using UI flow.', { tone: 'neutral' });
-    } else if (result.reason === 'MISSING_METADATA') {
-      showToast('Need full photo metadata. Using UI delete.', { tone: 'error' });
-    } else {
-      showToast('Delete via API failed. Falling back to UI.', { tone: 'error' });
     }
   }
 
-  await deleteViaUiFlow();
+  if (mode === VIEW_MODES.GRID) {
+    const button = findFirst(FAVORITE_GRID_SELECTORS);
+    if (button) {
+      button.click();
+      return;
+    }
+  }
+
+  dispatchKey('f', { code: 'KeyF', keyCode: 70 });
+}
+
+async function handleEnterDetail() {
+  const mode = detectViewMode();
+  if (mode === VIEW_MODES.ONE_UP) {
+    return;
+  }
+
+  if (mode === VIEW_MODES.GRID) {
+    const selected = document.querySelector('.PhotoItemView.is-selected');
+    if (selected) {
+      selected.focus?.();
+      simulateDoubleClick(selected);
+      return;
+    }
+  }
+
+  dispatchKey('Enter');
+}
+
+function simulateDoubleClick(element) {
+  if (!element) {
+    return;
+  }
+
+  const events = ['mousedown', 'mouseup', 'click', 'mousedown', 'mouseup', 'click', 'dblclick'];
+
+  events.forEach((type) => {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      detail: type === 'dblclick' ? 2 : 1
+    });
+    element.dispatchEvent(event);
+  });
+}
+
+async function handleDelete() {
+  const result = await deleteViaApi();
+  console.info('Fingertips delete: API attempt finished', result);
+  if (result.ok) {
+    return;
+  }
+
+  let fallbackToUi = false;
+
+  switch (result.reason) {
+    case 'NO_ENDPOINT_CAPTURED':
+      showToast('Delete endpoint not captured yet. Using UI flow.', { tone: 'neutral' });
+      fallbackToUi = true;
+      break;
+    case 'MISSING_METADATA':
+      showToast('Need full photo metadata. Using UI delete.', { tone: 'error' });
+      fallbackToUi = true;
+      break;
+    case 'ZONE_BUSY':
+      showToast('iCloud Photos is busy. Try again in a moment.', { tone: 'warning' });
+      return;
+    case 'REQUEST_FAILED':
+      showToast('Delete request failed. Try again shortly.', { tone: 'error' });
+      return;
+    default:
+      showToast('Delete via API failed. Falling back to UI.', { tone: 'error' });
+      fallbackToUi = true;
+      break;
+  }
+
+  if (fallbackToUi) {
+    console.info('Fingertips delete: falling back to UI flow');
+    await deleteViaUiFlow();
+  }
 }

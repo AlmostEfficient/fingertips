@@ -12,6 +12,13 @@ const PENDING_CAMERA_REQUESTS = new Map();
 let pendingConsentRequest = null;
 const CONSENT_PAGE_URL = chrome.runtime.getURL('consent/consent.html');
 let offscreenReady = false;
+const CLOUDKIT_HEADERS = {
+  'Content-Type': 'text/plain;charset=UTF-8',
+  Origin: 'https://www.icloud.com',
+  Referer: 'https://www.icloud.com/'
+};
+const CLOUDKIT_REGEX_FILTER = '^https://([a-z0-9-]+\\.)?ckdatabasews\\.icloud\\.com/';
+const CLOUDKIT_HEADER_RULE_ID = 1001;
 
 async function ensureOffscreenDocument() {
   if (!chrome.offscreen) {
@@ -68,7 +75,12 @@ chrome.windows.onRemoved.addListener((windowId) => {
 function cloneState(state) {
   return {
     ...state,
-    gestureMap: { ...state.gestureMap }
+    actionBindings: Object.fromEntries(
+      Object.entries(state.actionBindings || {}).map(([action, binding]) => [
+        action,
+        { ...(binding || {}) }
+      ])
+    )
   };
 }
 
@@ -79,6 +91,45 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({ [STATE_STORAGE_KEY]: initialState });
   }
 });
+
+async function ensureCloudkitHeaderRule() {
+  if (!chrome.declarativeNetRequest?.updateDynamicRules) {
+    return;
+  }
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [CLOUDKIT_HEADER_RULE_ID],
+      addRules: [
+        {
+          id: CLOUDKIT_HEADER_RULE_ID,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [
+              {
+                header: 'origin',
+                operation: 'set',
+                value: 'https://www.icloud.com'
+              },
+              {
+                header: 'referer',
+                operation: 'set',
+                value: 'https://www.icloud.com/'
+              }
+            ]
+          },
+          condition: {
+            regexFilter: CLOUDKIT_REGEX_FILTER,
+            resourceTypes: ['xmlhttprequest', 'other']
+          }
+        }
+      ]
+    });
+    console.info('Fingertips background: CloudKit header rule installed');
+  } catch (err) {
+    console.error('Fingertips: failed to install CloudKit header rule', err);
+  }
+}
 
 function decodeRequestBody(requestBody) {
   if (!requestBody) {
@@ -401,10 +452,24 @@ function waitForOffscreenReady(timeoutMs = 4000) {
 async function performDelete(recordPayload) {
   const endpointDetails = await getDeleteEndpoint();
   if (!endpointDetails) {
+    console.warn('Fingertips background: delete aborted, endpoint not captured');
     return { error: 'NO_ENDPOINT_CAPTURED' };
   }
 
-  if (!recordPayload?.recordName || !recordPayload?.recordChangeTag) {
+  if (!recordPayload?.recordName) {
+    console.warn('Fingertips background: delete aborted, record name missing', {
+      recordPayload
+    });
+    return { error: 'MISSING_RECORD_DATA' };
+  }
+
+  let recordChangeTag = recordPayload.recordChangeTag;
+  let recordType = recordPayload.recordType || endpointDetails.payloadTemplate.recordType;
+
+  if (!recordChangeTag) {
+    console.warn('Fingertips background: delete aborted, missing change tag', {
+      recordName: recordPayload.recordName
+    });
     return { error: 'MISSING_RECORD_DATA' };
   }
 
@@ -415,8 +480,8 @@ async function performDelete(recordPayload) {
         operationType: 'update',
         record: {
           recordName: recordPayload.recordName,
-          recordChangeTag: recordPayload.recordChangeTag,
-          recordType: endpointDetails.payloadTemplate.recordType,
+          recordChangeTag,
+          recordType,
           fields: {
             ...endpointDetails.payloadTemplate.fields,
             isDeleted: { value: 1 }
@@ -430,16 +495,17 @@ async function performDelete(recordPayload) {
   const response = await fetch(endpointDetails.url, {
     method: 'POST',
     credentials: 'include',
-    headers: {
-      'Content-Type': 'text/plain;charset=UTF-8',
-      Origin: 'https://www.icloud.com',
-      Referer: 'https://www.icloud.com/'
-    },
+    headers: { ...CLOUDKIT_HEADERS },
     body: JSON.stringify(body)
   });
 
   if (!response.ok) {
     const text = await response.text();
+    console.error('Fingertips background: delete API failed', {
+      recordName: recordPayload.recordName,
+      status: response.status,
+      body: text
+    });
     throw new Error(`Delete API responded with ${response.status}: ${text}`);
   }
 

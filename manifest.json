@@ -13,6 +13,8 @@
     "tabs",
     "activeTab",
     "webRequest",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
     "offscreen"
   ],
   "host_permissions": ["*://*.icloud.com/*"],
